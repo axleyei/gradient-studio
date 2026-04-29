@@ -29,7 +29,9 @@ const FORMAT_PRESETS = [
   { label: "Custom",             w: null, h: null },
 ];
 
-const GRADIENT_TYPES = ["Linear", "Radial", "Conic", "Mesh", "Wave", "Spiral"];
+const GRADIENT_TYPES   = ["Linear", "Circle", "Mesh", "Wave"];
+const ANIMATABLE_TYPES = ["Mesh", "Wave"];
+const MAX_COLORS = 6;
 
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
@@ -63,25 +65,12 @@ function hexToHsl(hex) {
   return [h*360, s*100, l*100];
 }
 
-function randomizeParams(current) {
-  return {
-    ...current,
-    type: GRADIENT_TYPES[Math.floor(Math.random() * GRADIENT_TYPES.length)],
-    angle: Math.floor(Math.random() * 360),
-    stops: Math.floor(randBetween(3, 8)),
-    softness: Math.floor(randBetween(20, 100)),
-    meshPoints: Math.floor(randBetween(3, 8)),
-    noiseIntensity: Math.floor(randBetween(0, 60)),
-    waveFreq: parseFloat(randBetween(0.5, 4).toFixed(1)),
-    waveAmp: Math.floor(randBetween(10, 80)),
-  };
-}
-
 // ─── Core Renderer ────────────────────────────────────────────────────────────
 // animT: 0..1 normalised cycle time; colorDrift: 0..1 hue shift amount
 function renderGradient(canvas, params, seed, animT = 0, colorDrift = 0) {
   const { w, h, type, angle, colors, stops, softness, meshPoints,
-          waveFreq, waveAmp, noiseIntensity, grainStatic, animDriftFactor = 1 } = params;
+          waveFreq, waveAmp, noiseIntensity, grainStatic,
+          animDriftFactor = 1, circleStyle = "spiral" } = params;
 
   if (canvas.width !== w || canvas.height !== h) {
     canvas.width = w; canvas.height = h;
@@ -109,23 +98,33 @@ function renderGradient(canvas, params, seed, animT = 0, colorDrift = 0) {
     stopPositions.forEach(({ pos, color }) => grad.addColorStop(pos, color));
     ctx.fillStyle = grad; ctx.fillRect(0, 0, w, h);
 
-  } else if (type === "Radial") {
-    const r = Math.max(w, h) * (0.3 + softness / 200);
-    const offsetX = (seed % 100) / 100 * w * 0.3 - w * 0.15;
-    const offsetY = ((seed * 7) % 100) / 100 * h * 0.3 - h * 0.15;
-    const grad = ctx.createRadialGradient(cx + offsetX, cy + offsetY, 0, cx, cy, r);
-    stopPositions.forEach(({ pos, color }) => grad.addColorStop(pos, color));
-    ctx.fillStyle = grad; ctx.fillRect(0, 0, w, h);
-
-  } else if (type === "Conic") {
-    const grad = ctx.createConicGradient(angleRad, cx, cy);
-    stopPositions.forEach(({ pos, color }) => grad.addColorStop(pos, color));
-    ctx.fillStyle = grad; ctx.fillRect(0, 0, w, h);
+  } else if (type === "Circle") {
+    if (circleStyle === "radial") {
+      const r = Math.max(w, h) * (0.3 + softness / 200);
+      const offsetX = (seed % 100) / 100 * w * 0.3 - w * 0.15;
+      const offsetY = ((seed * 7) % 100) / 100 * h * 0.3 - h * 0.15;
+      const grad = ctx.createRadialGradient(cx + offsetX, cy + offsetY, 0, cx, cy, r);
+      stopPositions.forEach(({ pos, color }) => grad.addColorStop(pos, color));
+      ctx.fillStyle = grad; ctx.fillRect(0, 0, w, h);
+    } else {
+      // Spiral
+      ctx.fillStyle = colorList[0]; ctx.fillRect(0, 0, w, h);
+      const rng2 = (n) => (Math.sin(seed * 5.3 + n * 27.1) * 0.5 + 0.5);
+      const turns = 2 + rng2(0) * 3, maxR = Math.max(w, h) * 0.8;
+      for (let i = colorList.length - 1; i >= 1; i--) {
+        const t = i / colorList.length;
+        const startAngle = angleRad + t * Math.PI * 2 * turns + animT * Math.PI * 2;
+        const px = cx + Math.cos(startAngle) * (t * maxR * 0.3);
+        const py = cy + Math.sin(startAngle) * (t * maxR * 0.3);
+        const g = ctx.createRadialGradient(px, py, 0, cx, cy, t * maxR * (softness/80+0.3));
+        g.addColorStop(0, colorList[i]); g.addColorStop(1, colorList[i] + "00");
+        ctx.fillStyle = g; ctx.fillRect(0, 0, w, h);
+      }
+    }
 
   } else if (type === "Mesh") {
     ctx.fillStyle = colorList[0]; ctx.fillRect(0, 0, w, h);
     const rng = (n) => (Math.sin(seed * 9.7 + n * 43.7) * 0.5 + 0.5);
-    // animT already encodes speed+duration via the cycles calculation in the tick.
     // A small 2nd harmonic perturbs the elliptical path for more organic motion.
     for (let i = 0; i < meshPoints; i++) {
       const baseX = rng(i * 3) * w, baseY = rng(i * 3 + 1) * h;
@@ -143,32 +142,22 @@ function renderGradient(canvas, params, seed, animT = 0, colorDrift = 0) {
     }
 
   } else if (type === "Wave") {
+    // waveAlpha encodes softness: full softness=100 → 0xCC opacity, softness=0 → 0x00
+    const waveAlpha = Math.round((softness / 100) * 0xCC).toString(16).padStart(2, "0");
     ctx.fillStyle = colorList[0]; ctx.fillRect(0, 0, w, h);
     for (let i = 1; i < colorList.length; i++) {
       const freq = waveFreq * (i * 0.7 + 0.3);
       const amp  = (waveAmp / 100) * h * 0.4;
       const phase = (seed * 0.01 + i * 1.3) + animT * Math.PI * 2;
       const g = ctx.createLinearGradient(0, 0, 0, h);
-      g.addColorStop(0, colorList[i] + "00"); g.addColorStop(0.5, colorList[i] + "CC"); g.addColorStop(1, colorList[i] + "00");
+      g.addColorStop(0, colorList[i] + "00");
+      g.addColorStop(0.5, colorList[i] + waveAlpha);
+      g.addColorStop(1, colorList[i] + "00");
       ctx.fillStyle = g; ctx.save(); ctx.beginPath(); ctx.moveTo(0, h);
       for (let x = 0; x <= w; x += 2) ctx.lineTo(x, cy + Math.sin((x/w)*Math.PI*2*freq+phase)*amp);
       ctx.lineTo(w, h); ctx.closePath(); ctx.globalAlpha = 0.7; ctx.fill(); ctx.restore();
     }
     ctx.globalAlpha = 1;
-
-  } else if (type === "Spiral") {
-    ctx.fillStyle = colorList[0]; ctx.fillRect(0, 0, w, h);
-    const rng2 = (n) => (Math.sin(seed * 5.3 + n * 27.1) * 0.5 + 0.5);
-    const turns = 2 + rng2(0) * 3, maxR = Math.max(w, h) * 0.8;
-    for (let i = colorList.length - 1; i >= 1; i--) {
-      const t = i / colorList.length;
-      const startAngle = angleRad + t * Math.PI * 2 * turns + animT * Math.PI * 2;
-      const px = cx + Math.cos(startAngle) * (t * maxR * 0.3);
-      const py = cy + Math.sin(startAngle) * (t * maxR * 0.3);
-      const g = ctx.createRadialGradient(px, py, 0, cx, cy, t * maxR * (softness/80+0.3));
-      g.addColorStop(0, colorList[i]); g.addColorStop(1, colorList[i] + "00");
-      ctx.fillStyle = g; ctx.fillRect(0, 0, w, h);
-    }
   }
 
   // Film grain
@@ -230,12 +219,13 @@ function SectionTitle({ children }) {
   );
 }
 
-function Toggle({ label, checked, onChange, id }) {
+function Toggle({ label, checked, onChange, id, disabled = false }) {
   return (
     <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 10 }}>
       <input type="checkbox" checked={checked} onChange={(e) => onChange(e.target.checked)} id={id}
-        style={{ accentColor: "#FF1A5E", width: 14, height: 14, cursor: "pointer" }} />
-      <label htmlFor={id} style={{ fontSize: 13, color: checked ? "#fff" : "#666", cursor: "pointer" }}>{label}</label>
+        disabled={disabled}
+        style={{ accentColor: "#FF1A5E", width: 14, height: 14, cursor: disabled ? "default" : "pointer" }} />
+      <label htmlFor={id} style={{ fontSize: 13, color: disabled ? "#444" : checked ? "#fff" : "#666", cursor: disabled ? "default" : "pointer" }}>{label}</label>
     </div>
   );
 }
@@ -267,38 +257,40 @@ export default function GradientGenerator() {
   const [scale, setScale] = useState(1);
 
   // Gradient
-  const [type, setType]         = useState("Mesh");
-  const [angle, setAngle]       = useState(135);
-  const [stops, setStops]       = useState(5);
-  const [softness, setSoftness] = useState(65);
+  const [type, setType]             = useState("Mesh");
+  const [circleStyle, setCircleStyle] = useState("spiral"); // "radial" | "spiral"
+  const [angle, setAngle]           = useState(135);
+  const [stops, setStops]           = useState(5);
+  const [softness, setSoftness]     = useState(65);
   const [meshPoints, setMeshPoints] = useState(5);
-  const [waveFreq, setWaveFreq] = useState(1.5);
-  const [waveAmp, setWaveAmp]   = useState(40);
+  const [waveFreq, setWaveFreq]     = useState(1.5);
+  const [waveAmp, setWaveAmp]       = useState(40);
 
   // Noise
-  const [noiseOn, setNoiseOn]             = useState(false);
+  const [noiseOn, setNoiseOn]               = useState(false);
   const [noiseIntensity, setNoiseIntensity] = useState(30);
-  const [grainStatic, setGrainStatic]     = useState(false);
+  const [grainStatic, setGrainStatic]       = useState(false);
 
   // Animation
-  const [animMode, setAnimMode]             = useState('still'); // 'still' | 'animated'
+  const [animEnabled, setAnimEnabled]       = useState(false);
   const [isPlaying, setIsPlaying]           = useState(false);
   const [animDuration, setAnimDuration]     = useState(6);
   const [animSpeed, setAnimSpeed]           = useState(50);
   const [animFps, setAnimFps]               = useState(30);
   const [animLoop, setAnimLoop]             = useState(true);
   const [animMovement, setAnimMovement]     = useState(true);
-  // const [animColorDrift, setAnimColorDrift] = useState(false); // Color Drift deactivated — re-enable toggle below to restore
+  // const [animColorDrift, setAnimColorDrift] = useState(false); // Color Drift deactivated
   const [isExporting, setIsExporting]       = useState(false);
   const [exportProgress, setExportProgress] = useState(0);
 
-  const activeFormat = FORMAT_PRESETS[formatIdx];
-  const outputW = (activeFormat.w ?? customW) * scale;
-  const outputH = (activeFormat.h ?? customH) * scale;
+  const activeFormat  = FORMAT_PRESETS[formatIdx];
+  const outputW       = (activeFormat.w ?? customW) * scale;
+  const outputH       = (activeFormat.h ?? customH) * scale;
   const activePalette = palettes[activePaletteIdx];
+  const isAnimatable  = ANIMATABLE_TYPES.includes(type);
 
   const params = {
-    w: outputW, h: outputH, type, angle,
+    w: outputW, h: outputH, type, angle, circleStyle,
     colors: activePalette.colors,
     stops, softness, meshPoints, waveFreq, waveAmp,
     noiseIntensity: noiseOn ? noiseIntensity : 0,
@@ -336,16 +328,20 @@ export default function GradientGenerator() {
       const { duration, loop, movement } = animRef.current;
       const elapsed = timestamp - animStartRef.current;
       const t = (elapsed / (duration * 1000)) % 1;
-      // One smooth pass per duration — no cycling within the clip.
-      // Speed is encoded in animDriftFactor inside paramsRef (controls orbit size, not frequency).
-      renderGradient(canvasRef.current, paramsRef.current, seed, movement ? t : 0, 0);
+      // Wave is always animated; Mesh respects the movement toggle.
+      const isWave = paramsRef.current.type === "Wave";
+      renderGradient(canvasRef.current, paramsRef.current, seed, (movement || isWave) ? t : 0, 0);
       if (!loop && elapsed >= duration * 1000) { stopAnimation(); renderGradient(canvasRef.current, paramsRef.current, seed, 0, 0); return; }
       animFrameRef.current = requestAnimationFrame(tick);
     };
     animFrameRef.current = requestAnimationFrame(tick);
   }, [seed, stopAnimation]);
 
-  useEffect(() => { if (animMode !== 'animated') stopAnimation(); }, [animMode, stopAnimation]);
+  // Stop animation when disabled or switching to non-animatable type
+  useEffect(() => {
+    if (!animEnabled || !isAnimatable) stopAnimation();
+  }, [animEnabled, isAnimatable, stopAnimation]);
+
   useEffect(() => () => stopAnimation(), [stopAnimation]);
 
   // ── WebM Export ───────────────────────────────────────────────────────────────
@@ -355,7 +351,9 @@ export default function GradientGenerator() {
     setIsExporting(true); setExportProgress(0);
 
     const fps = animFps, totalFrames = Math.ceil(fps * animDuration);
-    const exportW = activeFormat.w ?? customW, exportH = activeFormat.h ?? customH;
+    // Honor scale in export
+    const exportW = (activeFormat.w ?? customW) * scale;
+    const exportH = (activeFormat.h ?? customH) * scale;
     const exportCanvas = document.createElement("canvas");
     exportCanvas.width = exportW; exportCanvas.height = exportH;
     const exportParams = { ...params, w: exportW, h: exportH };
@@ -381,20 +379,27 @@ export default function GradientGenerator() {
     const interval = setInterval(() => {
       if (frame >= totalFrames) { clearInterval(interval); recorder.stop(); return; }
       const tBase = frame / totalFrames;
-      renderGradient(exportCanvas, exportParams, seed, animMovement ? tBase : 0, 0);
+      const isWave = exportParams.type === "Wave";
+      renderGradient(exportCanvas, exportParams, seed, (animMovement || isWave) ? tBase : 0, 0);
       setExportProgress(Math.round((frame / totalFrames) * 100));
       frame++;
     }, 1000 / fps);
-  }, [params, seed, animFps, animDuration, animMovement, activeFormat, customW, customH, stopAnimation]);
+  }, [params, seed, animFps, animDuration, animMovement, activeFormat, customW, customH, scale, stopAnimation]);
 
   // ── Regenerate / Randomize ───────────────────────────────────────────────────
   const regenerate = () => { stopAnimation(); setSeed(s => s + 1); };
   const randomize  = () => {
     stopAnimation();
-    const rp = randomizeParams({ type, angle, stops, softness, meshPoints, noiseIntensity, waveFreq, waveAmp });
-    setType(rp.type); setAngle(rp.angle); setStops(rp.stops); setSoftness(rp.softness);
-    setMeshPoints(rp.meshPoints); setNoiseIntensity(rp.noiseIntensity);
-    setWaveFreq(rp.waveFreq); setWaveAmp(rp.waveAmp);
+    const newType = GRADIENT_TYPES[Math.floor(Math.random() * GRADIENT_TYPES.length)];
+    setType(newType);
+    if (newType === "Circle") setCircleStyle(Math.random() < 0.5 ? "radial" : "spiral");
+    setAngle(Math.floor(Math.random() * 360));
+    setStops(Math.floor(randBetween(3, 8)));
+    setSoftness(Math.floor(randBetween(20, 100)));
+    setMeshPoints(Math.floor(randBetween(3, 8)));
+    setNoiseIntensity(Math.floor(randBetween(0, 60)));
+    setWaveFreq(parseFloat(randBetween(0.5, 4).toFixed(1)));
+    setWaveAmp(Math.floor(randBetween(10, 80)));
     setSeed(Math.floor(Math.random() * 999999));
   };
 
@@ -415,10 +420,13 @@ export default function GradientGenerator() {
   };
 
   // ── Palette ──────────────────────────────────────────────────────────────────
-  const addColor    = () => { const u=[...palettes]; u[activePaletteIdx]={...u[activePaletteIdx],colors:[...u[activePaletteIdx].colors,"#ffffff"]}; setPalettes(u); };
+  const addColor    = () => {
+    if (activePalette.colors.length >= MAX_COLORS) return;
+    const u=[...palettes]; u[activePaletteIdx]={...u[activePaletteIdx],colors:[...u[activePaletteIdx].colors,"#ffffff"]}; setPalettes(u);
+  };
   const removeColor = (i) => { if(activePalette.colors.length<=2)return; const u=[...palettes],c=[...u[activePaletteIdx].colors]; c.splice(i,1); u[activePaletteIdx]={...u[activePaletteIdx],colors:c}; setPalettes(u); };
   const updateColor = (i,hex) => { const u=[...palettes],c=[...u[activePaletteIdx].colors]; c[i]=hex; u[activePaletteIdx]={...u[activePaletteIdx],colors:c}; setPalettes(u); };
-  const savePalette = () => { if(!newPaletteName.trim())return; setPalettes([...palettes,{name:newPaletteName.trim(),colors:[...activePalette.colors]}]); setActivePaletteIdx(palettes.length); setNewPaletteName(""); };
+  const savePalette = () => { if(!newPaletteName.trim())return; setPalettes(p=>[...p,{name:newPaletteName.trim(),colors:[...activePalette.colors]}]); setActivePaletteIdx(palettes.length); setNewPaletteName(""); };
   const generatePalette = () => {
     const hue = Math.floor(Math.random()*360);
     const colors = Array.from({length:5},(_,i)=>hslToHex((hue+i*25+Math.random()*15)%360,70+Math.random()*30,35+Math.random()*30));
@@ -437,9 +445,20 @@ export default function GradientGenerator() {
           <div style={{ fontSize:11, color:"#666" }}>Visual Generator</div>
         </div>
 
-        <div style={{ display:"flex", gap:6, marginBottom:14 }}>
-          <Btn onClick={regenerate} bg="#333" style={{ flex:1 }}>↺ Regenerate</Btn>
-          <Btn onClick={randomize}  bg="#FF1A5E" style={{ flex:1 }}>⚡ Randomize</Btn>
+        {/* Format */}
+        <SectionTitle>Format</SectionTitle>
+        <Select value={formatIdx}
+          options={FORMAT_PRESETS.map((f,i)=>({label:f.label,value:i}))}
+          onChange={v=>{ const i=Number(v); setFormatIdx(i); if(FORMAT_PRESETS[i].w){setCustomW(FORMAT_PRESETS[i].w);setCustomH(FORMAT_PRESETS[i].h);} }}
+        />
+        <div style={{ display:"flex", gap:8, marginBottom:14 }}>
+          {[["Width",customW,setCustomW],["Height",customH,setCustomH]].map(([lbl,val,set])=>(
+            <div key={lbl} style={{ flex:1 }}>
+              <div style={{ fontSize:11, color:"#aaa", marginBottom:4 }}>{lbl}</div>
+              <input type="number" value={val} onChange={e=>{set(Number(e.target.value));setFormatIdx(FORMAT_PRESETS.length-1);}}
+                style={{ width:"100%", background:"#222", border:"1px solid #444", borderRadius:6, padding:"5px 8px", color:"#fff", fontSize:13 }} />
+            </div>
+          ))}
         </div>
 
         {/* Palette */}
@@ -454,7 +473,9 @@ export default function GradientGenerator() {
               {activePalette.colors.length>2 && <div onClick={()=>removeColor(i)} style={{ position:"absolute", top:-6, right:-6, width:14, height:14, background:"#ff4444", borderRadius:"50%", fontSize:9, display:"flex", alignItems:"center", justifyContent:"center", cursor:"pointer", fontWeight:700 }}>✕</div>}
             </div>
           ))}
-          <button onClick={addColor} style={{ width:32, height:32, borderRadius:6, background:"#2a2a2a", border:"2px dashed #555", color:"#888", fontSize:18, cursor:"pointer" }}>+</button>
+          {activePalette.colors.length < MAX_COLORS && (
+            <button onClick={addColor} style={{ width:32, height:32, borderRadius:6, background:"#2a2a2a", border:"2px dashed #555", color:"#888", fontSize:18, cursor:"pointer" }}>+</button>
+          )}
         </div>
         <div style={{ display:"flex", gap:6, marginBottom:4 }}>
           <Btn onClick={generatePalette} bg="#222" style={{ flex:1, fontSize:11, color:"#aaa" }}>🎲 Generate Palette</Btn>
@@ -467,7 +488,7 @@ export default function GradientGenerator() {
 
         {/* Gradient Type */}
         <SectionTitle>Gradient Type</SectionTitle>
-        <div style={{ display:"flex", flexWrap:"wrap", gap:5, marginBottom:12 }}>
+        <div style={{ display:"flex", flexWrap:"wrap", gap:5, marginBottom:10 }}>
           {GRADIENT_TYPES.map(t=>(
             <button key={t} onClick={()=>setType(t)}
               style={{ padding:"5px 10px", borderRadius:6, fontSize:11, fontWeight:600, cursor:"pointer", background:type===t?"#FF1A5E":"#2a2a2a", color:type===t?"#fff":"#aaa", border:"none" }}>
@@ -475,14 +496,34 @@ export default function GradientGenerator() {
             </button>
           ))}
         </div>
-        {(type==="Linear"||type==="Conic"||type==="Spiral") && <Slider label="Angle" value={angle} min={0} max={360} onChange={setAngle} unit="°" />}
-        <Slider label="Color Stops"       value={stops}    min={2}   max={10}  onChange={setStops} />
-        <Slider label="Softness / Spread" value={softness} min={10}  max={100} onChange={setSoftness} unit="%" />
+
+        {/* Circle sub-toggle */}
+        {type === "Circle" && (
+          <div style={{ display:"flex", gap:0, marginBottom:12, borderRadius:8, overflow:"hidden", border:"1px solid #444" }}>
+            <button onClick={()=>setCircleStyle("radial")}
+              style={{ flex:1, padding:"6px 0", fontSize:11, fontWeight:700, cursor:"pointer", border:"none", background:circleStyle==="radial"?"#FF1A5E":"#2a2a2a", color:circleStyle==="radial"?"#fff":"#777" }}>
+              Radial
+            </button>
+            <button onClick={()=>setCircleStyle("spiral")}
+              style={{ flex:1, padding:"6px 0", fontSize:11, fontWeight:700, cursor:"pointer", border:"none", background:circleStyle==="spiral"?"#FF1A5E":"#2a2a2a", color:circleStyle==="spiral"?"#fff":"#777" }}>
+              Spiral
+            </button>
+          </div>
+        )}
+
+        {(type==="Linear" || (type==="Circle" && circleStyle==="spiral")) && <Slider label="Angle" value={angle} min={0} max={360} onChange={setAngle} unit="°" />}
+        <Slider label="Color Stops" value={stops} min={2} max={10} onChange={setStops} />
+        {type !== "Linear" && <Slider label="Softness / Spread" value={softness} min={10} max={100} onChange={setSoftness} unit="%" />}
         {type==="Mesh" && <Slider label="Mesh Points" value={meshPoints} min={2} max={10} onChange={setMeshPoints} />}
         {type==="Wave" && <>
           <Slider label="Wave Frequency" value={waveFreq} min={0.5} max={5} step={0.1} onChange={setWaveFreq} />
           <Slider label="Wave Amplitude" value={waveAmp}  min={5}   max={100} onChange={setWaveAmp} unit="%" />
         </>}
+
+        <div style={{ display:"flex", gap:6, marginBottom:14 }}>
+          <Btn onClick={regenerate} bg="#333" style={{ flex:1 }}>↺ Regenerate</Btn>
+          <Btn onClick={randomize}  bg="#FF1A5E" style={{ flex:1 }}>⚡ Randomize</Btn>
+        </div>
 
         {/* Noise */}
         <SectionTitle>Noise / Film Grain</SectionTitle>
@@ -491,39 +532,56 @@ export default function GradientGenerator() {
 
         {/* Animation */}
         <SectionTitle>Animation</SectionTitle>
-        <div style={{ display:"flex", gap:0, marginBottom:14, borderRadius:8, overflow:"hidden", border:"1px solid #444" }}>
-          <button onClick={()=>setAnimMode('still')}
-            style={{ flex:1, padding:"7px 0", fontSize:12, fontWeight:700, cursor:"pointer", border:"none", background:animMode==='still'?"#FF1A5E":"#2a2a2a", color:animMode==='still'?"#fff":"#777" }}>
-            Still
-          </button>
-          <button onClick={()=>setAnimMode('animated')}
-            style={{ flex:1, padding:"7px 0", fontSize:12, fontWeight:700, cursor:"pointer", border:"none", background:animMode==='animated'?"#FF1A5E":"#2a2a2a", color:animMode==='animated'?"#fff":"#777" }}>
-            Animated
-          </button>
-        </div>
-
-        {animMode === 'animated' && <>
-          <div style={{ background:"#222", borderRadius:8, padding:"10px 10px 4px", marginBottom:12 }}>
-            <div style={{ fontSize:10, color:"#aaa", marginBottom:8, textTransform:"uppercase", letterSpacing:1 }}>Animate</div>
-            <Toggle label="Movement (blob drift)" checked={animMovement}   onChange={setAnimMovement}   id="animMov" />
-            {/* Color Drift deactivated — uncomment to restore: */}
-            {/* <Toggle label="Color drift (hue shift)" checked={animColorDrift} onChange={setAnimColorDrift} id="animCol" /> */}
+        {!isAnimatable ? (
+          <div>
+            <Toggle label="Enable Animation" checked={false} onChange={()=>{}} id="animEnabled" disabled />
+            <div style={{ fontSize:11, color:"#555", marginBottom:12, lineHeight:1.5 }}>
+              Animation not available for {type} gradients.
+            </div>
           </div>
-          <Slider label="Duration"                    value={animDuration} min={2}  max={30} onChange={setAnimDuration} unit="s" />
-          <Slider label="Speed / Movement Intensity"  value={animSpeed}    min={5}  max={200} onChange={setAnimSpeed} unit="%" />
-          <Slider label="Frame Rate"                  value={animFps}      min={6}  max={60} onChange={setAnimFps} unit=" fps" />
+        ) : (
+          <Toggle label="Enable Animation" checked={animEnabled} onChange={setAnimEnabled} id="animEnabled" />
+        )}
+
+        {animEnabled && isAnimatable && <>
+          {/* Color Drift deactivated — uncomment to restore: */}
+          {/* <Toggle label="Color drift (hue shift)" checked={animColorDrift} onChange={setAnimColorDrift} id="animCol" /> */}
+          <Slider label="Duration"                   value={animDuration} min={2}  max={30}  onChange={setAnimDuration} unit="s" />
+          <Slider label="Speed / Movement Intensity" value={animSpeed}    min={5}  max={200} onChange={setAnimSpeed} unit="%" />
+          <Slider label="Frame Rate"                 value={animFps}      min={6}  max={60}  onChange={setAnimFps} unit=" fps" />
+          {type === "Mesh" && <Toggle label="Blob drift" checked={animMovement} onChange={setAnimMovement} id="animMov" />}
           {noiseOn && <Toggle label="Static grain (fixed pattern)" checked={grainStatic} onChange={setGrainStatic} id="grainStatic" />}
           <Toggle label="Loop seamlessly" checked={animLoop} onChange={setAnimLoop} id="animLoop" />
-
-          <div style={{ display:"flex", gap:6, marginBottom:12 }}>
+          <div style={{ display:"flex", gap:6, marginBottom:4 }}>
             {!isPlaying
               ? <Btn onClick={startAnimation} bg="#1a6e3a" style={{ flex:1 }}>▶ Preview</Btn>
               : <Btn onClick={stopAnimation}  bg="#555"    style={{ flex:1 }}>■ Stop</Btn>
             }
           </div>
+        </>}
 
+        {/* Export */}
+        <SectionTitle>Export</SectionTitle>
+
+        <div style={{ fontSize:10, color:"#666", textTransform:"uppercase", letterSpacing:1, marginBottom:8 }}>Still</div>
+        <div style={{ display:"flex", gap:6, marginBottom:8 }}>
+          {[1,2].map(s=>(
+            <button key={s} onClick={()=>setScale(s)}
+              style={{ flex:1, padding:"5px 0", borderRadius:6, fontSize:12, fontWeight:700, cursor:"pointer", background:scale===s?"#FF1A5E":"#2a2a2a", color:scale===s?"#fff":"#aaa", border:"none" }}>
+              {s}× Size
+            </button>
+          ))}
+        </div>
+        <div style={{ fontSize:11, color:"#555", marginBottom:8, textAlign:"center" }}>{outputW} × {outputH}px</div>
+        <button onClick={downloadPng}
+          style={{ width:"100%", marginBottom:14, padding:"10px 0", borderRadius:8, background:"linear-gradient(135deg,#FF1A5E,#C8003A)", color:"#fff", fontWeight:700, fontSize:13, cursor:"pointer", border:"none", letterSpacing:0.5 }}>
+          ⬇ Download PNG
+        </button>
+
+        {animEnabled && isAnimatable && <>
+          <div style={{ fontSize:10, color:"#666", textTransform:"uppercase", letterSpacing:1, marginBottom:8 }}>Animation</div>
           {isExporting ? (
-            <div style={{ background:"#222", borderRadius:8, padding:"10px 12px", marginBottom:12 }}>
+            <div style={{ background:"#222", borderRadius:8, padding:"10px 12px", marginBottom:10 }}>
               <div style={{ fontSize:12, color:"#aaa", marginBottom:6 }}>Rendering… {exportProgress}%</div>
               <div style={{ height:6, background:"#333", borderRadius:3 }}>
                 <div style={{ height:"100%", width:`${exportProgress}%`, background:"#FF1A5E", borderRadius:3, transition:"width 0.2s" }} />
@@ -531,44 +589,14 @@ export default function GradientGenerator() {
             </div>
           ) : (
             <button onClick={exportWebM}
-              style={{ width:"100%", marginBottom:10, padding:"9px 0", borderRadius:8, background:"linear-gradient(135deg,#7c3aed,#4f46e5)", color:"#fff", fontWeight:700, fontSize:13, cursor:"pointer", border:"none" }}>
-              ⬇ Export WebM
+              style={{ width:"100%", marginBottom:8, padding:"9px 0", borderRadius:8, background:"linear-gradient(135deg,#7c3aed,#4f46e5)", color:"#fff", fontWeight:700, fontSize:13, cursor:"pointer", border:"none" }}>
+              ⬇ Download WebM
             </button>
           )}
           <div style={{ fontSize:10, color:"#555", marginBottom:12, lineHeight:1.5 }}>
-            Exports at 1× resolution. {animDuration}s @ {animFps}fps ≈ {Math.round(animDuration*animFps)} frames.
+            {animDuration}s @ {animFps}fps · {Math.round(animDuration*animFps)} frames · {outputW}×{outputH}px
           </div>
         </>}
-
-        {/* Output Format */}
-        <SectionTitle>Output Format</SectionTitle>
-        <Select value={formatIdx}
-          options={FORMAT_PRESETS.map((f,i)=>({label:f.label,value:i}))}
-          onChange={v=>{ const i=Number(v); setFormatIdx(i); if(FORMAT_PRESETS[i].w){setCustomW(FORMAT_PRESETS[i].w);setCustomH(FORMAT_PRESETS[i].h);} }}
-        />
-        <div style={{ display:"flex", gap:8, marginBottom:8 }}>
-          {[["Width",customW,setCustomW],["Height",customH,setCustomH]].map(([lbl,val,set])=>(
-            <div key={lbl} style={{ flex:1 }}>
-              <div style={{ fontSize:11, color:"#aaa", marginBottom:4 }}>{lbl}</div>
-              <input type="number" value={val} onChange={e=>{set(Number(e.target.value));setFormatIdx(FORMAT_PRESETS.length-1);}}
-                style={{ width:"100%", background:"#222", border:"1px solid #444", borderRadius:6, padding:"5px 8px", color:"#fff", fontSize:13 }} />
-            </div>
-          ))}
-        </div>
-        <div style={{ display:"flex", gap:6, marginBottom:6 }}>
-          {[1,2,3].map(s=>(
-            <button key={s} onClick={()=>setScale(s)}
-              style={{ flex:1, padding:"5px 0", borderRadius:6, fontSize:12, fontWeight:700, cursor:"pointer", background:scale===s?"#FF1A5E":"#2a2a2a", color:scale===s?"#fff":"#aaa", border:"none" }}>
-              {s}×
-            </button>
-          ))}
-        </div>
-        <div style={{ fontSize:11, color:"#555", marginBottom:14, textAlign:"center" }}>Output: {outputW} × {outputH}px</div>
-
-        <button onClick={downloadPng}
-          style={{ width:"100%", padding:"10px 0", borderRadius:8, background:"linear-gradient(135deg,#FF1A5E,#C8003A)", color:"#fff", fontWeight:700, fontSize:13, cursor:"pointer", border:"none", letterSpacing:0.5 }}>
-          ⬇ Download PNG
-        </button>
 
       </div>
 
