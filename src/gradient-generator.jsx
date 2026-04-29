@@ -3,11 +3,12 @@ import { useState, useEffect, useRef, useCallback } from "react";
 // ─── Presets ─────────────────────────────────────────────────────────────────
 const DEFAULT_PALETTE = {
   name: "Apple Music Brand",
-  colors: ["#F03497", "#AC1534", "#CD193A", "#E91C32", "#ED2865"],
+  colors: ["#FA233B", "#C00020", "#FF4DC3", "#591962", "#FFFFFF", "#000000"],
 };
 
 const BUILT_IN_PALETTES = [
   DEFAULT_PALETTE,
+  { name: "Artemis Ward",  colors: ["#C371F9", "#CCFF2B", "#000000", "#3D98FF", "#FF6C25"] },
   { name: "Ocean Depth",  colors: ["#0052D4", "#4364F7", "#6FB1FC", "#00C6FF", "#0072FF"] },
   { name: "Sunset",       colors: ["#FF512F", "#F09819", "#FF5E62", "#FF9966", "#FFAD5A"] },
   { name: "Aurora",       colors: ["#00C9FF", "#92FE9D", "#00B4DB", "#0083B0", "#6DD5FA"] },
@@ -16,7 +17,8 @@ const BUILT_IN_PALETTES = [
 ];
 
 const FORMAT_PRESETS = [
-  { label: "16:9 (1920×1080)",   w: 1920, h: 1080 },
+  { label: "16:9",               w: 1920, h: 1080 },
+  { label: "9:16",               w: 1080, h: 1920 },
   { label: "Instagram Square",   w: 1080, h: 1080 },
   { label: "Instagram Portrait", w: 1080, h: 1350 },
   { label: "Instagram Story",    w: 1080, h: 1920 },
@@ -28,6 +30,7 @@ const FORMAT_PRESETS = [
 ];
 
 const GRADIENT_TYPES = ["Linear", "Radial", "Conic", "Mesh", "Wave", "Spiral"];
+
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 function randBetween(a, b) { return a + Math.random() * (b - a); }
@@ -75,10 +78,10 @@ function randomizeParams(current) {
 }
 
 // ─── Core Renderer ────────────────────────────────────────────────────────────
-// animT: 0..1 normalised loop time; colorDrift: 0..1 hue shift amount
+// animT: 0..1 normalised cycle time; colorDrift: 0..1 hue shift amount
 function renderGradient(canvas, params, seed, animT = 0, colorDrift = 0) {
   const { w, h, type, angle, colors, stops, softness, meshPoints,
-          waveFreq, waveAmp, noiseIntensity } = params;
+          waveFreq, waveAmp, noiseIntensity, grainStatic, animDriftFactor = 1 } = params;
 
   if (canvas.width !== w || canvas.height !== h) {
     canvas.width = w; canvas.height = h;
@@ -93,7 +96,7 @@ function renderGradient(canvas, params, seed, animT = 0, colorDrift = 0) {
   const driftedColors = colors.map(hex => {
     if (colorDrift === 0) return hex;
     const [h, s, l] = hexToHsl(hex);
-    return hslToHex((h + colorDrift * 60) % 360, s, l);
+    return hslToHex((h + colorDrift * 20) % 360, s, l);
   });
 
   const colorList = Array.from({ length: stops }, (_, i) => driftedColors[i % driftedColors.length]);
@@ -122,12 +125,16 @@ function renderGradient(canvas, params, seed, animT = 0, colorDrift = 0) {
   } else if (type === "Mesh") {
     ctx.fillStyle = colorList[0]; ctx.fillRect(0, 0, w, h);
     const rng = (n) => (Math.sin(seed * 9.7 + n * 43.7) * 0.5 + 0.5);
+    // animT already encodes speed+duration via the cycles calculation in the tick.
+    // A small 2nd harmonic perturbs the elliptical path for more organic motion.
     for (let i = 0; i < meshPoints; i++) {
       const baseX = rng(i * 3) * w, baseY = rng(i * 3 + 1) * h;
       const phase = rng(i * 3 + 5) * Math.PI * 2;
-      const driftAmt = Math.max(w, h) * 0.18;
-      const px = baseX + Math.sin(animT * Math.PI * 2 + phase) * driftAmt;
-      const py = baseY + Math.cos(animT * Math.PI * 2 + phase * 1.3) * driftAmt * 0.7;
+      const driftAmt = Math.max(w, h) * 0.18 * Math.min(2.5, animDriftFactor);
+      const p1 = animT * Math.PI * 2;
+      const p2 = animT * Math.PI * 4;
+      const px = baseX + (Math.sin(p1 + phase) * 0.85 + Math.sin(p2 + phase * 0.7) * 0.15) * driftAmt;
+      const py = baseY + (Math.cos(p1 + phase * 1.3) * 0.85 + Math.cos(p2 + phase * 1.9) * 0.15) * driftAmt * 0.7;
       const radius = (0.3 + rng(i * 3 + 2) * 0.6) * Math.max(w, h) * (softness / 100 + 0.2);
       const g = ctx.createRadialGradient(px, py, 0, px, py, radius);
       g.addColorStop(0, colorList[i % colorList.length] + "EE");
@@ -169,7 +176,7 @@ function renderGradient(canvas, params, seed, animT = 0, colorDrift = 0) {
     const imageData = ctx.getImageData(0, 0, w, h);
     const data = imageData.data;
     const intensity = (noiseIntensity / 100) * 120;
-    const grainSeed = seed + Math.round(animT * 10000);
+    const grainSeed = grainStatic ? seed : seed + Math.round(animT * 10000);
     const hash = (x, y, s) => {
       let n = (x * 1619 + y * 31337 + s * 6971) & 0x7fffffff;
       n = ((n >> 16) ^ n) * 0x45d9f3b; n = ((n >> 16) ^ n) * 0x45d9f3b; n = (n >> 16) ^ n;
@@ -271,6 +278,7 @@ export default function GradientGenerator() {
   // Noise
   const [noiseOn, setNoiseOn]             = useState(false);
   const [noiseIntensity, setNoiseIntensity] = useState(30);
+  const [grainStatic, setGrainStatic]     = useState(false);
 
   // Animation
   const [animMode, setAnimMode]             = useState('still'); // 'still' | 'animated'
@@ -280,7 +288,7 @@ export default function GradientGenerator() {
   const [animFps, setAnimFps]               = useState(30);
   const [animLoop, setAnimLoop]             = useState(true);
   const [animMovement, setAnimMovement]     = useState(true);
-  const [animColorDrift, setAnimColorDrift] = useState(true);
+  // const [animColorDrift, setAnimColorDrift] = useState(false); // Color Drift deactivated — re-enable toggle below to restore
   const [isExporting, setIsExporting]       = useState(false);
   const [exportProgress, setExportProgress] = useState(0);
 
@@ -294,6 +302,8 @@ export default function GradientGenerator() {
     colors: activePalette.colors,
     stops, softness, meshPoints, waveFreq, waveAmp,
     noiseIntensity: noiseOn ? noiseIntensity : 0,
+    grainStatic,
+    animDriftFactor: animSpeed / 50,
   };
 
   // ── Still render ─────────────────────────────────────────────────────────────
@@ -313,9 +323,9 @@ export default function GradientGenerator() {
   // Capture params in a ref so the rAF closure always sees latest values
   const paramsRef = useRef(params);
   useEffect(() => { paramsRef.current = params; }, [JSON.stringify(params)]);
-  const animRef = useRef({ duration: animDuration, speed: animSpeed, loop: animLoop, movement: animMovement, colorDrift: animColorDrift });
-  useEffect(() => { animRef.current = { duration: animDuration, speed: animSpeed, loop: animLoop, movement: animMovement, colorDrift: animColorDrift }; },
-    [animDuration, animSpeed, animLoop, animMovement, animColorDrift]);
+  const animRef = useRef({ duration: animDuration, loop: animLoop, movement: animMovement });
+  useEffect(() => { animRef.current = { duration: animDuration, loop: animLoop, movement: animMovement }; },
+    [animDuration, animLoop, animMovement]);
 
   const startAnimation = useCallback(() => {
     stopAnimation();
@@ -323,11 +333,12 @@ export default function GradientGenerator() {
     animStartRef.current = null;
     const tick = (timestamp) => {
       if (!animStartRef.current) animStartRef.current = timestamp;
-      const { duration, speed, loop, movement, colorDrift } = animRef.current;
+      const { duration, loop, movement } = animRef.current;
       const elapsed = timestamp - animStartRef.current;
       const t = (elapsed / (duration * 1000)) % 1;
-      const sf = speed / 50;
-      renderGradient(canvasRef.current, paramsRef.current, seed, movement ? t * sf % 1 : 0, colorDrift ? t * sf % 1 : 0);
+      // One smooth pass per duration — no cycling within the clip.
+      // Speed is encoded in animDriftFactor inside paramsRef (controls orbit size, not frequency).
+      renderGradient(canvasRef.current, paramsRef.current, seed, movement ? t : 0, 0);
       if (!loop && elapsed >= duration * 1000) { stopAnimation(); renderGradient(canvasRef.current, paramsRef.current, seed, 0, 0); return; }
       animFrameRef.current = requestAnimationFrame(tick);
     };
@@ -343,7 +354,7 @@ export default function GradientGenerator() {
     stopAnimation();
     setIsExporting(true); setExportProgress(0);
 
-    const fps = animFps, totalFrames = Math.ceil(fps * animDuration), sf = animSpeed / 50;
+    const fps = animFps, totalFrames = Math.ceil(fps * animDuration);
     const exportW = activeFormat.w ?? customW, exportH = activeFormat.h ?? customH;
     const exportCanvas = document.createElement("canvas");
     exportCanvas.width = exportW; exportCanvas.height = exportH;
@@ -369,12 +380,12 @@ export default function GradientGenerator() {
     let frame = 0;
     const interval = setInterval(() => {
       if (frame >= totalFrames) { clearInterval(interval); recorder.stop(); return; }
-      const t = ((frame / totalFrames) * sf) % 1;
-      renderGradient(exportCanvas, exportParams, seed, animMovement ? t : 0, animColorDrift ? t : 0);
+      const tBase = frame / totalFrames;
+      renderGradient(exportCanvas, exportParams, seed, animMovement ? tBase : 0, 0);
       setExportProgress(Math.round((frame / totalFrames) * 100));
       frame++;
     }, 1000 / fps);
-  }, [params, seed, animFps, animDuration, animSpeed, animMovement, animColorDrift, activeFormat, customW, customH, stopAnimation]);
+  }, [params, seed, animFps, animDuration, animMovement, activeFormat, customW, customH, stopAnimation]);
 
   // ── Regenerate / Randomize ───────────────────────────────────────────────────
   const regenerate = () => { stopAnimation(); setSeed(s => s + 1); };
@@ -495,11 +506,13 @@ export default function GradientGenerator() {
           <div style={{ background:"#222", borderRadius:8, padding:"10px 10px 4px", marginBottom:12 }}>
             <div style={{ fontSize:10, color:"#aaa", marginBottom:8, textTransform:"uppercase", letterSpacing:1 }}>Animate</div>
             <Toggle label="Movement (blob drift)" checked={animMovement}   onChange={setAnimMovement}   id="animMov" />
-            <Toggle label="Color drift (hue shift)" checked={animColorDrift} onChange={setAnimColorDrift} id="animCol" />
+            {/* Color Drift deactivated — uncomment to restore: */}
+            {/* <Toggle label="Color drift (hue shift)" checked={animColorDrift} onChange={setAnimColorDrift} id="animCol" /> */}
           </div>
           <Slider label="Duration"                    value={animDuration} min={2}  max={30} onChange={setAnimDuration} unit="s" />
-          <Slider label="Speed / Movement Intensity"  value={animSpeed}    min={5}  max={100} onChange={setAnimSpeed} unit="%" />
+          <Slider label="Speed / Movement Intensity"  value={animSpeed}    min={5}  max={200} onChange={setAnimSpeed} unit="%" />
           <Slider label="Frame Rate"                  value={animFps}      min={6}  max={60} onChange={setAnimFps} unit=" fps" />
+          {noiseOn && <Toggle label="Static grain (fixed pattern)" checked={grainStatic} onChange={setGrainStatic} id="grainStatic" />}
           <Toggle label="Loop seamlessly" checked={animLoop} onChange={setAnimLoop} id="animLoop" />
 
           <div style={{ display:"flex", gap:6, marginBottom:12 }}>
@@ -527,8 +540,8 @@ export default function GradientGenerator() {
           </div>
         </>}
 
-        {/* Output Size */}
-        <SectionTitle>Output Size</SectionTitle>
+        {/* Output Format */}
+        <SectionTitle>Output Format</SectionTitle>
         <Select value={formatIdx}
           options={FORMAT_PRESETS.map((f,i)=>({label:f.label,value:i}))}
           onChange={v=>{ const i=Number(v); setFormatIdx(i); if(FORMAT_PRESETS[i].w){setCustomW(FORMAT_PRESETS[i].w);setCustomH(FORMAT_PRESETS[i].h);} }}
