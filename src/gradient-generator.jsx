@@ -9,9 +9,9 @@ const DEFAULT_PALETTE = {
 const BUILT_IN_PALETTES = [
   DEFAULT_PALETTE,
   { name: "Artemis Ward",  colors: ["#C371F9", "#CCFF2B", "#000000", "#3D98FF", "#FF6C25"] },
-  { name: "Ocean Depth",  colors: ["#0052D4", "#4364F7", "#6FB1FC", "#00C6FF", "#0072FF"] },
-  { name: "Sunset",       colors: ["#FF512F", "#F09819", "#FF5E62", "#FF9966", "#FFAD5A"] },
-  { name: "Aurora",       colors: ["#00C9FF", "#92FE9D", "#00B4DB", "#0083B0", "#6DD5FA"] },
+  { name: "Ocean Depth",  colors: ["#03045E", "#023E8A", "#0077B6", "#00B4D8", "#90E0EF"] },
+  { name: "Sunset",       colors: ["#D62246", "#FF3864", "#F7882F", "#FFC107", "#F77F00"] },
+  { name: "Aurora",       colors: ["#10002B", "#6A0DAD", "#4FC3F7", "#00E676", "#B2FF59"] },
   { name: "Noir",         colors: ["#1a1a2e", "#16213e", "#0f3460", "#533483", "#e94560"] },
   { name: "Candy",        colors: ["#f953c6", "#b91d73", "#ee0979", "#ff6a00", "#ee0979"] },
 ];
@@ -29,10 +29,18 @@ const FORMAT_PRESETS = [
   { label: "Custom",             w: null, h: null },
 ];
 
-const GRADIENT_TYPES   = ["Linear", "Circle", "Mesh", "Wave"];
+const GRADIENT_TYPES   = ["Linear", "Circle", "Mesh", "Wave", "Mosaic"];
 const ANIMATABLE_TYPES = ["Mesh", "Wave"];
 const MAX_COLORS = 6;
 
+// ─── localStorage ────────────────────────────────────────────────────────────
+const STORAGE_KEY = "gradient-studio-palettes-v1";
+function loadUserPalettes() {
+  try { return JSON.parse(localStorage.getItem(STORAGE_KEY) || "[]"); } catch { return []; }
+}
+function persistUserPalettes(allPalettes) {
+  try { localStorage.setItem(STORAGE_KEY, JSON.stringify(allPalettes.slice(BUILT_IN_PALETTES.length))); } catch {}
+}
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 function randBetween(a, b) { return a + Math.random() * (b - a); }
@@ -88,7 +96,12 @@ function renderGradient(canvas, params, seed, animT = 0, colorDrift = 0) {
     return hslToHex((h + colorDrift * 20) % 360, s, l);
   });
 
-  const colorList = Array.from({ length: stops }, (_, i) => driftedColors[i % driftedColors.length]);
+  // Spread stops evenly across the full palette so stops=2 always uses first+last,
+  // stops=3 uses first/middle/last, etc. — rather than just picking adjacent colors.
+  const colorList = Array.from({ length: stops }, (_, i) => {
+    const t = stops === 1 ? 0 : i / (stops - 1);
+    return driftedColors[Math.round(t * (driftedColors.length - 1))];
+  });
   const stopPositions = colorList.map((c, i) => ({ pos: i / (colorList.length - 1 || 1), color: c }));
 
   if (type === "Linear") {
@@ -140,6 +153,86 @@ function renderGradient(canvas, params, seed, animT = 0, colorDrift = 0) {
       g.addColorStop(1, colorList[i % colorList.length] + "00");
       ctx.fillStyle = g; ctx.fillRect(0, 0, w, h);
     }
+
+  } else if (type === "Mosaic") {
+    const { mosaicCols = 8, mosaicRows = 6, mosaicGap = 2,
+            mosaicCellAngle = 45, mosaicCellOpacity = 0.5, mosaicBlend = 0.3 } = params;
+
+    // Sample a blended colour from stopPositions at normalised position t (0–1).
+    // Uses linear RGB interpolation between the two bracketing stops, matching
+    // what the browser does inside createLinearGradient.
+    const sampleStops = (t) => {
+      const clamped = Math.max(0, Math.min(1, t));
+      if (stopPositions.length === 1) return stopPositions[0].color;
+      let lo = stopPositions[0], hi = stopPositions[stopPositions.length - 1];
+      for (let i = 0; i < stopPositions.length - 1; i++) {
+        if (clamped >= stopPositions[i].pos && clamped <= stopPositions[i + 1].pos) {
+          lo = stopPositions[i]; hi = stopPositions[i + 1]; break;
+        }
+      }
+      const f = hi.pos === lo.pos ? 0 : (clamped - lo.pos) / (hi.pos - lo.pos);
+      const p = hex => [parseInt(hex.slice(1,3),16), parseInt(hex.slice(3,5),16), parseInt(hex.slice(5,7),16)];
+      const [r1,g1,b1] = p(lo.color), [r2,g2,b2] = p(hi.color);
+      return `#${Math.round(r1+(r2-r1)*f).toString(16).padStart(2,'0')}${Math.round(g1+(g2-g1)*f).toString(16).padStart(2,'0')}${Math.round(b1+(b2-b1)*f).toString(16).padStart(2,'0')}`;
+    };
+
+    // ── Layer 1: Macro gradient (full canvas) ───────────────────────────────
+    // softness maps to gradient reach: low = compressed dark end, high = spread
+    const spread = 0.3 + (softness / 100) * 0.7;
+    const macroLen = Math.max(w, h) * spread;
+    const mx1 = cx - Math.cos(angleRad) * macroLen, my1 = cy - Math.sin(angleRad) * macroLen;
+    const mx2 = cx + Math.cos(angleRad) * macroLen, my2 = cy + Math.sin(angleRad) * macroLen;
+    const macroGrad = ctx.createLinearGradient(mx1, my1, mx2, my2);
+    stopPositions.forEach(({ pos, color }) => macroGrad.addColorStop(pos, color));
+    ctx.fillStyle = macroGrad; ctx.fillRect(0, 0, w, h);
+
+    // Project a canvas point onto the macro gradient axis to get its t-value
+    const macroT = (px, py) => {
+      const dx = mx2 - mx1, dy = my2 - my1, lenSq = dx*dx + dy*dy;
+      return lenSq === 0 ? 0 : Math.max(0, Math.min(1, ((px-mx1)*dx + (py-my1)*dy) / lenSq));
+    };
+
+    // ── Layer 2: Cell overlay ───────────────────────────────────────────────
+    const cellW = (w - mosaicGap * (mosaicCols - 1)) / mosaicCols;
+    const cellH = (h - mosaicGap * (mosaicRows - 1)) / mosaicRows;
+    const cellRad = (mosaicCellAngle * Math.PI) / 180;
+    const lerp = (a, b, f) => a + (b - a) * f;
+
+    for (let row = 0; row < mosaicRows; row++) {
+      for (let col = 0; col < mosaicCols; col++) {
+        const cellX = col * (cellW + mosaicGap);
+        const cellY = row * (cellH + mosaicGap);
+        const ccx = cellX + cellW / 2, ccy = cellY + cellH / 2;
+
+        // Sample macro ramp at cell centre; derive dark/light tones from it.
+        // Small seed-driven jitter shifts each cell's t slightly so New Seed
+        // produces visibly different colour variation across the grid.
+        const jitter = (Math.sin(seed * 9.7 + (row * mosaicCols + col) * 43.7) * 0.5 + 0.5 - 0.5) * 0.08;
+        const t = Math.max(0, Math.min(1, macroT(ccx, ccy) + jitter));
+        const darkColor  = sampleStops(Math.max(0, t - 0.18));
+        const lightColor = sampleStops(Math.min(1, t + 0.35));
+
+        // Local endpoints: cell-sized gradient anchored to cell centre
+        const halfDiag = Math.sqrt(cellW * cellW + cellH * cellH) / 2;
+        const lx1 = ccx - Math.cos(cellRad) * halfDiag, ly1 = ccy - Math.sin(cellRad) * halfDiag;
+        const lx2 = ccx + Math.cos(cellRad) * halfDiag, ly2 = ccy + Math.sin(cellRad) * halfDiag;
+
+        // Blend toward global (macro-scale) endpoints → seamless at blend = 1
+        const x1 = lerp(lx1, mx1, mosaicBlend), y1 = lerp(ly1, my1, mosaicBlend);
+        const x2 = lerp(lx2, mx2, mosaicBlend), y2 = lerp(ly2, my2, mosaicBlend);
+
+        ctx.save();
+        ctx.beginPath(); ctx.rect(cellX, cellY, cellW, cellH); ctx.clip();
+
+        const cellGrad = ctx.createLinearGradient(x1, y1, x2, y2);
+        cellGrad.addColorStop(0, darkColor); cellGrad.addColorStop(1, lightColor);
+        ctx.globalAlpha = mosaicCellOpacity;
+        ctx.fillStyle = cellGrad; ctx.fillRect(cellX, cellY, cellW, cellH);
+
+        ctx.restore();
+      }
+    }
+    ctx.globalAlpha = 1;
 
   } else if (type === "Wave") {
     // waveAlpha encodes softness: full softness=100 → 0xCC opacity, softness=0 → 0x00
@@ -246,9 +339,13 @@ export default function GradientGenerator() {
   const chunksRef    = useRef([]);
 
   const [seed, setSeed] = useState(42);
-  const [palettes, setPalettes] = useState([...BUILT_IN_PALETTES]);
+  const [palettes, setPalettes] = useState(() => [...BUILT_IN_PALETTES, ...loadUserPalettes()]);
   const [activePaletteIdx, setActivePaletteIdx] = useState(0);
   const [newPaletteName, setNewPaletteName] = useState("");
+  const [deleteConfirm, setDeleteConfirm] = useState(false);
+  // tempPalette holds unsaved edits/generated colors; null = using palettes[activePaletteIdx]
+  const [tempPalette, setTempPalette] = useState(null);
+  const [brandTipVisible, setBrandTipVisible] = useState(false);
 
   // Format
   const [formatIdx, setFormatIdx] = useState(0);
@@ -265,6 +362,12 @@ export default function GradientGenerator() {
   const [meshPoints, setMeshPoints] = useState(5);
   const [waveFreq, setWaveFreq]     = useState(1.5);
   const [waveAmp, setWaveAmp]       = useState(40);
+  const [mosaicCols, setMosaicCols]               = useState(9);
+  const [mosaicRows, setMosaicRows]               = useState(5);
+  const [mosaicGap, setMosaicGap]                 = useState(0);
+  const [mosaicCellAngle, setMosaicCellAngle]     = useState(0);
+  const [mosaicCellOpacity, setMosaicCellOpacity] = useState(0.7);
+  const [mosaicBlend, setMosaicBlend]             = useState(0.2);
 
   // Noise
   const [noiseOn, setNoiseOn]               = useState(false);
@@ -283,16 +386,18 @@ export default function GradientGenerator() {
   const [isExporting, setIsExporting]       = useState(false);
   const [exportProgress, setExportProgress] = useState(0);
 
-  const activeFormat  = FORMAT_PRESETS[formatIdx];
-  const outputW       = (activeFormat.w ?? customW) * scale;
-  const outputH       = (activeFormat.h ?? customH) * scale;
-  const activePalette = palettes[activePaletteIdx];
-  const isAnimatable  = ANIMATABLE_TYPES.includes(type);
+  const activeFormat     = FORMAT_PRESETS[formatIdx];
+  const outputW          = (activeFormat.w ?? customW) * scale;
+  const outputH          = (activeFormat.h ?? customH) * scale;
+  const activePalette    = tempPalette ?? palettes[activePaletteIdx];
+  const isAnimatable     = ANIMATABLE_TYPES.includes(type);
+  const isBuiltInPalette = !tempPalette && activePaletteIdx < BUILT_IN_PALETTES.length;
 
   const params = {
     w: outputW, h: outputH, type, angle, circleStyle,
     colors: activePalette.colors,
     stops, softness, meshPoints, waveFreq, waveAmp,
+    mosaicCols, mosaicRows, mosaicGap, mosaicCellAngle, mosaicCellOpacity, mosaicBlend,
     noiseIntensity: noiseOn ? noiseIntensity : 0,
     grainStatic,
     animDriftFactor: animSpeed / 50,
@@ -393,6 +498,14 @@ export default function GradientGenerator() {
     const newType = GRADIENT_TYPES[Math.floor(Math.random() * GRADIENT_TYPES.length)];
     setType(newType);
     if (newType === "Circle") setCircleStyle(Math.random() < 0.5 ? "radial" : "spiral");
+    if (newType === "Mosaic") {
+      setMosaicCols(Math.floor(randBetween(4, 14)));
+      setMosaicRows(Math.floor(randBetween(3, 10)));
+      setMosaicGap(Math.floor(randBetween(0, 8)));
+      setMosaicCellAngle(Math.floor(Math.random() * 360));
+      setMosaicCellOpacity(parseFloat(randBetween(0.25, 0.75).toFixed(2)));
+      setMosaicBlend(parseFloat(randBetween(0, 0.8).toFixed(2)));
+    }
     setAngle(Math.floor(Math.random() * 360));
     setStops(Math.floor(randBetween(3, 8)));
     setSoftness(Math.floor(randBetween(20, 100)));
@@ -420,17 +533,73 @@ export default function GradientGenerator() {
   };
 
   // ── Palette ──────────────────────────────────────────────────────────────────
-  const addColor    = () => {
-    if (activePalette.colors.length >= MAX_COLORS) return;
-    const u=[...palettes]; u[activePaletteIdx]={...u[activePaletteIdx],colors:[...u[activePaletteIdx].colors,"#ffffff"]}; setPalettes(u);
+  // Enter temp mode: show unsaved colors in the dropdown as "Custom (unsaved)"
+  // without touching the palettes array. Pre-fills the name input.
+  const startTemp = (colors, suggestedName) => {
+    setTempPalette({ colors });
+    setNewPaletteName(suggestedName);
+    setDeleteConfirm(false);
   };
-  const removeColor = (i) => { if(activePalette.colors.length<=2)return; const u=[...palettes],c=[...u[activePaletteIdx].colors]; c.splice(i,1); u[activePaletteIdx]={...u[activePaletteIdx],colors:c}; setPalettes(u); };
-  const updateColor = (i,hex) => { const u=[...palettes],c=[...u[activePaletteIdx].colors]; c[i]=hex; u[activePaletteIdx]={...u[activePaletteIdx],colors:c}; setPalettes(u); };
-  const savePalette = () => { if(!newPaletteName.trim())return; setPalettes(p=>[...p,{name:newPaletteName.trim(),colors:[...activePalette.colors]}]); setActivePaletteIdx(palettes.length); setNewPaletteName(""); };
+
+  const addColor = () => {
+    if (activePalette.colors.length >= MAX_COLORS) return;
+    const newColors = [...activePalette.colors, "#ffffff"];
+    if (tempPalette || isBuiltInPalette) {
+      startTemp(newColors, tempPalette ? newPaletteName : `${palettes[activePaletteIdx].name} custom`);
+    } else {
+      const u = [...palettes];
+      u[activePaletteIdx] = { ...u[activePaletteIdx], colors: newColors };
+      setPalettes(u); persistUserPalettes(u);
+    }
+  };
+
+  const removeColor = (i) => {
+    if (activePalette.colors.length <= 2) return;
+    const newColors = activePalette.colors.filter((_, ci) => ci !== i);
+    if (tempPalette || isBuiltInPalette) {
+      startTemp(newColors, tempPalette ? newPaletteName : `${palettes[activePaletteIdx].name} custom`);
+    } else {
+      const u = [...palettes];
+      u[activePaletteIdx] = { ...u[activePaletteIdx], colors: newColors };
+      setPalettes(u); persistUserPalettes(u);
+    }
+  };
+
+  const updateColor = (i, hex) => {
+    const newColors = [...activePalette.colors]; newColors[i] = hex;
+    if (tempPalette || isBuiltInPalette) {
+      startTemp(newColors, tempPalette ? newPaletteName : `${palettes[activePaletteIdx].name} custom`);
+    } else {
+      const u = [...palettes];
+      u[activePaletteIdx] = { ...u[activePaletteIdx], colors: newColors };
+      setPalettes(u); persistUserPalettes(u);
+    }
+  };
+
+  const savePalette = () => {
+    if (!newPaletteName.trim()) return;
+    const colors = activePalette.colors; // uses tempPalette if active, else current
+    const next = [...palettes, { name: newPaletteName.trim(), colors: [...colors] }];
+    setPalettes(next); setActivePaletteIdx(next.length - 1);
+    setTempPalette(null); setNewPaletteName("");
+    persistUserPalettes(next);
+  };
+
+  const deletePalette = () => {
+    if (isBuiltInPalette || tempPalette) return;
+    const next = palettes.filter((_, i) => i !== activePaletteIdx);
+    setPalettes(next);
+    setActivePaletteIdx(Math.max(0, activePaletteIdx - 1));
+    setDeleteConfirm(false);
+    persistUserPalettes(next);
+  };
+
   const generatePalette = () => {
-    const hue = Math.floor(Math.random()*360);
-    const colors = Array.from({length:5},(_,i)=>hslToHex((hue+i*25+Math.random()*15)%360,70+Math.random()*30,35+Math.random()*30));
-    const u=[...palettes]; u[activePaletteIdx]={...u[activePaletteIdx],colors}; setPalettes(u); setSeed(s=>s+1);
+    const hue = Math.floor(Math.random() * 360);
+    const colors = Array.from({ length: 5 }, (_, i) =>
+      hslToHex((hue + i * 25 + Math.random() * 15) % 360, 70 + Math.random() * 30, 35 + Math.random() * 30));
+    startTemp(colors, "Generated");
+    setSeed(s => s + 1);
   };
 
   // ── JSX ───────────────────────────────────────────────────────────────────────
@@ -438,7 +607,7 @@ export default function GradientGenerator() {
     <div style={{ display:"flex", height:"100vh", background:"#111", color:"#fff", fontFamily:"'Inter',system-ui,sans-serif", overflow:"hidden" }}>
 
       {/* Sidebar */}
-      <div style={{ width:284, minWidth:284, background:"#1a1a1a", borderRight:"1px solid #2a2a2a", overflowY:"auto", padding:"16px 14px", display:"flex", flexDirection:"column", gap:2 }}>
+      <div style={{ width:284, minWidth:284, maxWidth:284, background:"#1a1a1a", borderRight:"1px solid #2a2a2a", overflowY:"auto", overflowX:"hidden", padding:"16px 14px", display:"flex", flexDirection:"column", gap:2 }}>
 
         <div style={{ marginBottom:14 }}>
           <div style={{ fontSize:16, fontWeight:800, letterSpacing:-0.5 }}>Gradient Studio</div>
@@ -451,40 +620,82 @@ export default function GradientGenerator() {
           options={FORMAT_PRESETS.map((f,i)=>({label:f.label,value:i}))}
           onChange={v=>{ const i=Number(v); setFormatIdx(i); if(FORMAT_PRESETS[i].w){setCustomW(FORMAT_PRESETS[i].w);setCustomH(FORMAT_PRESETS[i].h);} }}
         />
-        <div style={{ display:"flex", gap:8, marginBottom:14 }}>
+        <div style={{ display:"flex", gap:6, marginBottom:14 }}>
           {[["Width",customW,setCustomW],["Height",customH,setCustomH]].map(([lbl,val,set])=>(
-            <div key={lbl} style={{ flex:1 }}>
+            <div key={lbl} style={{ flex:1, minWidth:0 }}>
               <div style={{ fontSize:11, color:"#aaa", marginBottom:4 }}>{lbl}</div>
               <input type="number" value={val} onChange={e=>{set(Number(e.target.value));setFormatIdx(FORMAT_PRESETS.length-1);}}
-                style={{ width:"100%", background:"#222", border:"1px solid #444", borderRadius:6, padding:"5px 8px", color:"#fff", fontSize:13 }} />
+                style={{ width:"100%", minWidth:0, boxSizing:"border-box", background:"#222", border:"1px solid #444", borderRadius:6, padding:"5px 6px", color:"#fff", fontSize:13 }} />
             </div>
           ))}
         </div>
 
         {/* Palette */}
         <SectionTitle>Color Palette</SectionTitle>
-        <Select value={activePaletteIdx} options={palettes.map((p,i)=>({label:p.name,value:i}))} onChange={v=>setActivePaletteIdx(Number(v))} />
-        <div style={{ display:"flex", flexWrap:"wrap", gap:6, marginBottom:8 }}>
-          {activePalette.colors.map((c,i)=>(
-            <div key={i} style={{ position:"relative" }}>
-              <div style={{ width:32, height:32, borderRadius:6, background:c, border:"2px solid #444", cursor:"pointer", position:"relative", overflow:"hidden" }}>
-                <input type="color" value={c} onChange={e=>updateColor(i,e.target.value)} style={{ position:"absolute", inset:0, opacity:0, cursor:"pointer", width:"100%", height:"100%" }} />
+        <Select
+          value={tempPalette ? -1 : activePaletteIdx}
+          options={[
+            ...palettes.map((p, i) => ({ label: p.name, value: i })),
+            ...(tempPalette ? [{ label: "Custom (unsaved)", value: -1 }] : []),
+          ]}
+          onChange={v => {
+            const n = Number(v);
+            if (n < 0) return;
+            setActivePaletteIdx(n); setTempPalette(null);
+            setNewPaletteName(""); setDeleteConfirm(false);
+          }}
+        />
+
+        {/* Swatches row — brand tooltip icon anchored top-right */}
+        <div style={{ position:"relative", marginBottom:8 }}>
+          <div style={{ display:"flex", flexWrap:"wrap", gap:6, paddingRight: activePaletteIdx===0 && !tempPalette ? 22 : 0 }}>
+            {activePalette.colors.map((c,i)=>(
+              <div key={i} style={{ position:"relative" }}>
+                <div style={{ width:32, height:32, borderRadius:6, background:c, border:"2px solid #444", cursor:"pointer", position:"relative", overflow:"hidden" }}>
+                  <input type="color" value={c} onChange={e=>updateColor(i,e.target.value)} style={{ position:"absolute", inset:0, opacity:0, cursor:"pointer", width:"100%", height:"100%" }} />
+                </div>
+                {activePalette.colors.length>2 && <div onClick={()=>removeColor(i)} style={{ position:"absolute", top:-6, right:-6, width:14, height:14, background:"#ff4444", borderRadius:"50%", fontSize:9, display:"flex", alignItems:"center", justifyContent:"center", cursor:"pointer", fontWeight:700 }}>✕</div>}
               </div>
-              {activePalette.colors.length>2 && <div onClick={()=>removeColor(i)} style={{ position:"absolute", top:-6, right:-6, width:14, height:14, background:"#ff4444", borderRadius:"50%", fontSize:9, display:"flex", alignItems:"center", justifyContent:"center", cursor:"pointer", fontWeight:700 }}>✕</div>}
+            ))}
+            {activePalette.colors.length < MAX_COLORS && (
+              <button onClick={addColor} style={{ width:32, height:32, borderRadius:6, background:"#2a2a2a", border:"2px dashed #555", color:"#888", fontSize:18, cursor:"pointer" }}>+</button>
+            )}
+          </div>
+          {activePaletteIdx === 0 && !tempPalette && (
+            <div style={{ position:"absolute", top:0, right:0 }}
+              onMouseEnter={()=>setBrandTipVisible(true)} onMouseLeave={()=>setBrandTipVisible(false)}>
+              <span style={{ fontSize:15, color:"#555", cursor:"help", userSelect:"none", lineHeight:1 }}>ⓘ</span>
+              {brandTipVisible && (
+                <div style={{ position:"absolute", right:0, top:"calc(100% + 6px)", zIndex:200, background:"#2a2a2a", border:"1px solid #555", borderRadius:8, padding:"10px 12px", width:196, fontSize:11, color:"#bbb", lineHeight:1.8, boxShadow:"0 4px 20px rgba(0,0,0,0.7)" }}>
+                  <div style={{ fontWeight:700, color:"#fff", marginBottom:4, fontSize:12 }}>Apple Music Brand</div>
+                  Red ≥50%<br/>Dark Red ≤25%<br/>Fuchsia ≤25%
+                </div>
+              )}
             </div>
-          ))}
-          {activePalette.colors.length < MAX_COLORS && (
-            <button onClick={addColor} style={{ width:32, height:32, borderRadius:6, background:"#2a2a2a", border:"2px dashed #555", color:"#888", fontSize:18, cursor:"pointer" }}>+</button>
           )}
         </div>
-        <div style={{ display:"flex", gap:6, marginBottom:4 }}>
-          <Btn onClick={generatePalette} bg="#222" style={{ flex:1, fontSize:11, color:"#aaa" }}>🎲 Generate Palette</Btn>
-        </div>
-        <div style={{ display:"flex", gap:6, marginBottom:16 }}>
-          <input value={newPaletteName} onChange={e=>setNewPaletteName(e.target.value)} placeholder="Name & save palette…"
-            style={{ flex:1, background:"#222", border:"1px solid #444", borderRadius:6, padding:"5px 8px", color:"#fff", fontSize:12 }} />
+
+        <Btn onClick={generatePalette} bg="#222" style={{ width:"100%", marginBottom:8, fontSize:11, color:"#aaa" }}>🎲 Generate New Palette</Btn>
+
+        <div style={{ display:"flex", gap:6, marginBottom:8 }}>
+          <input value={newPaletteName} onChange={e=>setNewPaletteName(e.target.value)} placeholder="Name & save current palette…"
+            style={{ flex:1, minWidth:0, background:"#222", border:"1px solid #444", borderRadius:6, padding:"5px 8px", color:"#fff", fontSize:12 }} />
           <Btn onClick={savePalette} bg="#333">Save</Btn>
         </div>
+
+        {/* Delete saved palette */}
+        {!isBuiltInPalette && !tempPalette && (
+          deleteConfirm
+            ? <div style={{ display:"flex", gap:6, marginBottom:12, alignItems:"center" }}>
+                <span style={{ fontSize:11, color:"#aaa", flex:1 }}>Delete "{palettes[activePaletteIdx].name}"?</span>
+                <Btn onClick={deletePalette} bg="#991b1b" style={{ fontSize:11, padding:"4px 10px" }}>Delete</Btn>
+                <Btn onClick={()=>setDeleteConfirm(false)} bg="#333" style={{ fontSize:11, padding:"4px 10px" }}>Cancel</Btn>
+              </div>
+            : <div style={{ marginBottom:12 }}>
+                <Btn onClick={()=>setDeleteConfirm(true)} bg="#2a2a2a" style={{ fontSize:11, color:"#888" }}>🗑 Delete Palette</Btn>
+              </div>
+        )}
+        {(isBuiltInPalette || tempPalette) && <div style={{ marginBottom:12 }} />}
 
         {/* Gradient Type */}
         <SectionTitle>Gradient Type</SectionTitle>
@@ -511,7 +722,7 @@ export default function GradientGenerator() {
           </div>
         )}
 
-        {(type==="Linear" || (type==="Circle" && circleStyle==="spiral")) && <Slider label="Angle" value={angle} min={0} max={360} onChange={setAngle} unit="°" />}
+        {(type==="Linear" || type==="Mosaic" || (type==="Circle" && circleStyle==="spiral")) && <Slider label="Angle" value={angle} min={0} max={360} onChange={setAngle} unit="°" />}
         <Slider label="Color Stops" value={stops} min={2} max={10} onChange={setStops} />
         {type !== "Linear" && <Slider label="Softness / Spread" value={softness} min={10} max={100} onChange={setSoftness} unit="%" />}
         {type==="Mesh" && <Slider label="Mesh Points" value={meshPoints} min={2} max={10} onChange={setMeshPoints} />}
@@ -519,9 +730,17 @@ export default function GradientGenerator() {
           <Slider label="Wave Frequency" value={waveFreq} min={0.5} max={5} step={0.1} onChange={setWaveFreq} />
           <Slider label="Wave Amplitude" value={waveAmp}  min={5}   max={100} onChange={setWaveAmp} unit="%" />
         </>}
+        {type==="Mosaic" && <>
+          <Slider label="Columns"        value={mosaicCols}        min={2}   max={16}  onChange={setMosaicCols} />
+          <Slider label="Rows"           value={mosaicRows}        min={2}   max={12}  onChange={setMosaicRows} />
+          <Slider label="Gap"            value={mosaicGap}         min={0}   max={20}  onChange={setMosaicGap} unit="px" />
+          <Slider label="Cell Angle"     value={mosaicCellAngle}   min={0}   max={360} onChange={setMosaicCellAngle} unit="°" />
+          <Slider label="Cell Opacity"   value={mosaicCellOpacity} min={0}   max={1}   step={0.05} onChange={setMosaicCellOpacity} />
+          <Slider label="Seamless Blend" value={mosaicBlend}       min={0}   max={1}   step={0.05} onChange={setMosaicBlend} />
+        </>}
 
         <div style={{ display:"flex", gap:6, marginBottom:14 }}>
-          <Btn onClick={regenerate} bg="#333" style={{ flex:1 }}>↺ Regenerate</Btn>
+          <Btn onClick={regenerate} bg="#333" style={{ flex:1 }}>↺ New Seed</Btn>
           <Btn onClick={randomize}  bg="#FF1A5E" style={{ flex:1 }}>⚡ Randomize</Btn>
         </div>
 
@@ -563,8 +782,7 @@ export default function GradientGenerator() {
         {/* Export */}
         <SectionTitle>Export</SectionTitle>
 
-        <div style={{ fontSize:10, color:"#666", textTransform:"uppercase", letterSpacing:1, marginBottom:8 }}>Still</div>
-        <div style={{ display:"flex", gap:6, marginBottom:8 }}>
+        <div style={{ display:"flex", gap:6, marginBottom:6 }}>
           {[1,2].map(s=>(
             <button key={s} onClick={()=>setScale(s)}
               style={{ flex:1, padding:"5px 0", borderRadius:6, fontSize:12, fontWeight:700, cursor:"pointer", background:scale===s?"#FF1A5E":"#2a2a2a", color:scale===s?"#fff":"#aaa", border:"none" }}>
@@ -572,7 +790,8 @@ export default function GradientGenerator() {
             </button>
           ))}
         </div>
-        <div style={{ fontSize:11, color:"#555", marginBottom:8, textAlign:"center" }}>{outputW} × {outputH}px</div>
+        <div style={{ fontSize:11, color:"#555", marginBottom:10, textAlign:"center" }}>{outputW} × {outputH}px</div>
+        <div style={{ fontSize:10, color:"#666", textTransform:"uppercase", letterSpacing:1, marginBottom:8 }}>Still</div>
         <button onClick={downloadPng}
           style={{ width:"100%", marginBottom:14, padding:"10px 0", borderRadius:8, background:"linear-gradient(135deg,#FF1A5E,#C8003A)", color:"#fff", fontWeight:700, fontSize:13, cursor:"pointer", border:"none", letterSpacing:0.5 }}>
           ⬇ Download PNG
